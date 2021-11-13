@@ -1,6 +1,7 @@
 import spacy
 from dataclasses import dataclass
 import json
+from textwrap import wrap
 
 import plotly.express as px
 import numpy as np
@@ -14,6 +15,10 @@ from sklearn.decomposition import PCA
 from sklearn import metrics
 from sklearn.cluster import KMeans, MiniBatchKMeans
 
+from distinctipy import distinctipy
+import plotly.colors as pco
+import plotly.graph_objects as go
+
 nlp_fr = spacy.load("fr_core_news_md")
 
 @dataclass
@@ -26,12 +31,12 @@ class TokenizerFR():
         return " ".join([token.lemma_ for token in texte_tokens if token.pos_ in self.fonctions and not token.lemma_.isdigit()])
             
         
-## Inputs
+## Inputs et paramètres
 
-data_path = "DATA_PFE_11_01_2021.json"
-n_resumes = 100
+data_path = "DATA_PFE_11_01_2021.json" # Données à classifier
+n_resumes = 100 # Quantité à classifier
 n_clusters_max = n_resumes//5
-n_dimensions = 50
+n_dimensions = 30 # Contrôler la "spécificité" des clusters : plus de dimensions = clusters moins nombreux et plus généraux 
 n_termes_pertinents = 3
 max_df = n_resumes//10
 min_df = 2
@@ -44,8 +49,9 @@ with open(data_path,"r",encoding="utf-8") as file:
 
 data = pd.DataFrame(data)
 print(f"Nombre de documents : {len(data)}")
-data = data[~data["resume"].isna()]
-print(f"Nombre de documents avec résumé : {len(data)}")
+data = data[(~data["resume"].isna()) & (data["langue"]=="français")]
+data = data.drop_duplicates(subset=["resume"])
+print(f"Nombre de documents avec résumés différents et en français: {len(data)}")
 data = data.head(n_resumes)
 print(f"Nombre de documents à clusteriser : {len(data)}")
 
@@ -59,7 +65,7 @@ def corriger_localisation(lieux):
 
 data["lieu_projet"] = data["lieu_projet"].apply(corriger_localisation)
 data["zone_geo_projet"] = data["zone_geo_projet"].apply(corriger_localisation)
-
+data["annee"] = data["annee"].apply(lambda x : x[0] if len(x)==1 else "Date inconnue")
 
 ## Tokenisation des résumés
 TK = TokenizerFR(nlp_fr,["NOUN"])#,"VERB"
@@ -108,6 +114,7 @@ termes = vectorizer.get_feature_names_out()
 print(f"NOMBRES DE TERMES : {len(termes)}")
 
 termes_par_cluster = {i : ", ".join([termes[ind] for ind in ordre_centroides[i, :n_termes_pertinents]]) for i in range(n_clusters)}
+couleurs_par_cluster = {i : pco.label_rgb(pco.convert_to_RGB_255(clr)) for i,clr in enumerate(distinctipy.get_colors(n_clusters))}
 
 [print(k,v) for k,v in termes_par_cluster.items()]
 
@@ -115,35 +122,63 @@ termes_par_cluster = {i : ", ".join([termes[ind] for ind in ordre_centroides[i, 
 ## Affectation des résultats dans les documents de départ
 data["cluster_index"] = Y
 data["cluster_termes"] = data["cluster_index"].map(termes_par_cluster)
+data["cluster_clr"] = data["cluster_index"].map(couleurs_par_cluster)
 
+## Réduction dimensionnelle à deux et trois dimensions pour le traçage
+pca_2d = PCA(2)
+X_2d = pca_2d.fit_transform(X)
 
-## Réduction dimensionnelle à trois dimensions pour le traçage
-pca = PCA(3)
-X_2d = pca.fit_transform(X)
+data["x_2d"] = [x for x,y in X_2d]
+data["y_2d"] = [y for x,y in X_2d]
 
-data["x"] = [x for x,y,z in X_2d]
-data["y"] = [y for x,y,z in X_2d]
-data["z"] = [z for x,y,z in X_2d]
+pca_3d = PCA(3)
+X_3d = pca_3d.fit_transform(X)
+
+data["x_3d"] = [x for x,y,z in X_3d]
+data["y_3d"] = [y for x,y,z in X_3d]
+data["z_3d"] = [z for x,y,z in X_3d]
 
 ## Traçage du graphique
-import plotly.express as px
 
-fig = px.scatter_3d(
-    data, 
-    x='x', 
-    y='y', 
-    z='z',
-    color='cluster_termes',
-    opacity=0.9,
-    hover_name="titre",
-    hover_data={
-        "x" : False,
-        "y" : False,
-        "z" : False,
-        "annee" : True,
-        "lieu_projet" : True,
-        "zone_geo_projet" : True},
+
+def generer_bulle_infos(doc):
+    html_string = """<b>%s</b></br></br>%s</br><i>%s</br>%s, %s</i>"""%("<br>".join(wrap(doc["titre"],40)),doc["cluster_termes"],doc["annee"],doc["lieu_projet"],doc["zone_geo_projet"])
+    return html_string
+
+data["texte_graph"] = data.apply(generer_bulle_infos,axis=1)
+
+fig = go.Figure()
+for ind,data_cluster in data.groupby(["cluster_index"]):
+    fig.add_traces(go.Scatter3d(
+            x=data_cluster["x_3d"],
+            y=data_cluster["y_3d"],
+            z=data_cluster["z_3d"],
+            mode='markers',
+            text = data_cluster["texte_graph"],
+            marker=dict(size=9,color=couleurs_par_cluster[ind],line_width=1),
+            hoverinfo = "text",
+            name= f"<b>{ind}: </b>" + termes_par_cluster[ind]
+        ))
+    
+fig.update_layout(
     template="simple_white",
+    hoverlabel_align = 'left',
+    hoverlabel=dict(bgcolor="white",font_size=13),
+    legend_title=f"Classification de <br><b>{len(data)}</b> rapports de PFE <br>en <b>{n_clusters}</b> clusters <br>",
+    font=dict(family="Courier New, monospace",size=14,color="black"),
+    margin=dict(b=0,t=0,l=0),
+    scene_camera=dict(eye=dict(x=1.5, y=1.5, z=1)),
+    scene=dict(
+        xaxis=dict(showticklabels=False,showspikes=False),
+        yaxis=dict(showticklabels=False,showspikes=False),
+        zaxis=dict(showticklabels=False,showspikes=False),
+        ),
+    legend=dict(
+        yanchor="middle",
+        y=0.5,
+        xanchor="left",
+        x=1)
     )
-fig.update_layout(hoverlabel={"font_size" : 14})
+fig.update_yaxes(automargin=True)
+
 fig.write_html("carte_sémantique.html")
